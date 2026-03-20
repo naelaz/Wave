@@ -1,5 +1,6 @@
 #include "audio/Engine.h"
 #include "core/Log.h"
+#include "platform/Win32Helpers.h"
 
 #include <string>
 #include <cstring>
@@ -167,7 +168,10 @@ void Engine::shutdown() {
 }
 
 bool Engine::loadFile(std::string_view path) {
-    if (!m_mpv) return false;
+    if (!m_mpv) {
+        log::warn("Cannot load file: audio engine not initialized");
+        return false;
+    }
 
     std::string p(path);
     const char* cmd[] = { "loadfile", p.c_str(), nullptr };
@@ -178,6 +182,11 @@ bool Engine::loadFile(std::string_view path) {
         log::error(msg);
         return false;
     }
+
+    // Extract filename only (strip directory path)
+    std::wstring widePath = platform::toWide(path);
+    auto slash = widePath.find_last_of(L"\\/");
+    m_fileName = (slash != std::wstring::npos) ? widePath.substr(slash + 1) : widePath;
 
     std::string msg = "Loading: ";
     msg += path;
@@ -198,6 +207,7 @@ void Engine::stop() {
     m_state = PlaybackState::Stopped;
     m_position = 0.0;
     m_duration = 0.0;
+    m_fileName.clear();
     log::info("Playback stopped");
 }
 
@@ -205,6 +215,20 @@ void Engine::seekRelative(double seconds) {
     if (!m_mpv || m_state == PlaybackState::Stopped) return;
     std::string sec = std::to_string(seconds);
     const char* cmd[] = { "seek", sec.c_str(), "relative", nullptr };
+    mpv.command(static_cast<mpv_handle*>(m_mpv), cmd);
+    std::string msg = "Seek: ";
+    msg += (seconds >= 0 ? "+" : "");
+    msg += std::to_string(static_cast<int>(seconds));
+    msg += "s";
+    log::info(msg);
+}
+
+void Engine::seekAbsolute(double seconds) {
+    if (!m_mpv || m_state == PlaybackState::Stopped) return;
+    if (seconds < 0.0) seconds = 0.0;
+    if (m_duration > 0.0 && seconds > m_duration) seconds = m_duration;
+    std::string sec = std::to_string(seconds);
+    const char* cmd[] = { "seek", sec.c_str(), "absolute", nullptr };
     mpv.command(static_cast<mpv_handle*>(m_mpv), cmd);
 }
 
@@ -223,6 +247,7 @@ double Engine::volume()   const { return m_volume; }
 double Engine::position() const { return m_position; }
 double Engine::duration() const { return m_duration; }
 PlaybackState Engine::state() const { return m_state; }
+const std::wstring& Engine::fileNameW() const { return m_fileName; }
 
 void Engine::processEvents() {
     if (!m_mpv) return;
@@ -242,6 +267,7 @@ void Engine::processEvents() {
                 m_state = PlaybackState::Stopped;
                 m_position = 0.0;
                 log::info("Playback ended");
+                if (m_trackEndCb) m_trackEndCb(m_trackEndCtx);
                 break;
 
             case MPV_EVENT_PROPERTY_CHANGE: {

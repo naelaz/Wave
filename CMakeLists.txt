@@ -13,6 +13,9 @@ set(WAVE_SOURCES
     src/core/Log.cpp
     src/platform/Win32Helpers.cpp
     src/audio/Engine.cpp
+    src/ui/Renderer.cpp
+    src/library/Library.cpp
+    src/metadata/Metadata.cpp
 )
 
 set(WAVE_HEADERS
@@ -21,11 +24,19 @@ set(WAVE_HEADERS
     src/core/Log.h
     src/platform/Win32Helpers.h
     src/audio/Engine.h
+    src/ui/Renderer.h
+    src/library/Library.h
+    src/metadata/Metadata.h
+)
+
+# ── Resources ─────────────────────────────────────────────────
+set(WAVE_RESOURCES
+    src/resources/resources.rc
 )
 
 # ── Executable ────────────────────────────────────────────────
 # WIN32 flag = Windows desktop app (WinMain entry, no console)
-add_executable(Wave WIN32 ${WAVE_SOURCES} ${WAVE_HEADERS})
+add_executable(Wave WIN32 ${WAVE_SOURCES} ${WAVE_HEADERS} ${WAVE_RESOURCES})
 
 target_include_directories(Wave PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -38,6 +49,8 @@ target_link_libraries(Wave PRIVATE
     dwrite
     dwmapi
     uxtheme
+    comdlg32
+    ole32
 )
 
 # ── Compiler options ──────────────────────────────────────────
