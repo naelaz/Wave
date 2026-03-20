@@ -2,6 +2,7 @@
 
 #include <Windows.h>
 #include "window/MainWindow.h"
+#include "audio/Engine.h"
 
 namespace wave {
 
@@ -14,6 +15,7 @@ public:
 private:
     HINSTANCE m_hInstance = nullptr;
     MainWindow m_mainWindow;
+    Engine m_engine;
 };
 
 } // namespace wave

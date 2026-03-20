@@ -12,6 +12,7 @@ set(WAVE_SOURCES
     src/window/MainWindow.cpp
     src/core/Log.cpp
     src/platform/Win32Helpers.cpp
+    src/audio/Engine.cpp
 )
 
 set(WAVE_HEADERS
@@ -19,6 +20,7 @@ set(WAVE_HEADERS
     src/window/MainWindow.h
     src/core/Log.h
     src/platform/Win32Helpers.h
+    src/audio/Engine.h
 )
 
 # ── Executable ────────────────────────────────────────────────

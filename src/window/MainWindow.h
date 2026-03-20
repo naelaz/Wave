@@ -4,9 +4,11 @@
 
 namespace wave {
 
+class Engine;
+
 class MainWindow {
 public:
-    bool create(HINSTANCE hInstance);
+    bool create(HINSTANCE hInstance, Engine* engine);
     void show();
     HWND handle() const { return m_hwnd; }
 
