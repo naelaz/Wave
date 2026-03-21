@@ -3,6 +3,8 @@
 #include <Windows.h>
 #include <string>
 #include <string_view>
+#include <vector>
+#include "audio/AudioSettings.h"
 
 namespace wave {
 
@@ -17,15 +19,28 @@ public:
     // Window message posted when mpv has events ready
     static constexpr UINT WM_MPV_WAKEUP = WM_USER + 1;
 
-    bool init(HWND notifyWindow);
+    bool init(HWND notifyWindow, const AudioSettings& audioSettings = {});
     void shutdown();
 
     bool loadFile(std::string_view path);
     void togglePause();
+    void setPaused(bool paused);
     void stop();
     void seekRelative(double seconds);
     void seekAbsolute(double seconds);
     void setVolume(double vol);
+
+    // Runtime audio settings (no restart needed)
+    void setGapless(bool enabled);
+    void setReplayGain(ReplayGainMode mode);
+    void setReplayGainPreamp(double db);
+    void setAudioDevice(const std::string& deviceId);
+    void setAudioFilter(const std::string& filterStr); // set mpv af property
+
+    // Audio device enumeration — returns pairs of {id, name}
+    struct AudioDevice { std::string id; std::string name; };
+    std::vector<AudioDevice> getAudioDevices() const;
+    std::string currentAudioDevice() const;
 
     double volume() const;
     double position() const;

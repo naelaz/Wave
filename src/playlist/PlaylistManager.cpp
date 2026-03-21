@@ -69,6 +69,19 @@ bool PlaylistManager::dequeueNext(TrackInfo& out) {
 // ── Persistence ──────────────────────────────────────────────
 
 std::wstring PlaylistManager::appDataDir() {
+    wchar_t exePath[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    std::wstring eDir(exePath);
+    auto s = eDir.find_last_of(L"\\/");
+    if (s != std::wstring::npos) eDir = eDir.substr(0, s);
+
+    std::wstring marker = eDir + L"\\portable.txt";
+    if (GetFileAttributesW(marker.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        std::wstring dir = eDir + L"\\data";
+        CreateDirectoryW(dir.c_str(), nullptr);
+        return dir;
+    }
+
     wchar_t* appData = nullptr;
     if (FAILED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &appData)))
         return L".";

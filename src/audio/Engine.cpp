@@ -28,6 +28,11 @@ enum mpv_event_id {
     MPV_EVENT_PROPERTY_CHANGE = 22,
 };
 
+struct mpv_event_end_file {
+    int reason;   // 0=eof, 2=stop, 3=quit, 4=error
+    int error;
+};
+
 struct mpv_event_property {
     const char* name;
     mpv_format  format;
@@ -54,6 +59,8 @@ using pfn_mpv_observe_property    = int(*)(mpv_handle*, uint64_t, const char*, m
 using pfn_mpv_wait_event          = mpv_event*(*)(mpv_handle*, double);
 using pfn_mpv_set_wakeup_callback = void(*)(mpv_handle*, void(*)(void*), void*);
 using pfn_mpv_error_string        = const char*(*)(int);
+using pfn_mpv_get_property_string = char*(*)(mpv_handle*, const char*);
+using pfn_mpv_free                = void(*)(void*);
 
 // ── Loaded function pointers ─────────────────────────────────
 
@@ -70,6 +77,8 @@ static struct MpvApi {
     pfn_mpv_wait_event          wait_event = nullptr;
     pfn_mpv_set_wakeup_callback set_wakeup_callback = nullptr;
     pfn_mpv_error_string        error_string = nullptr;
+    pfn_mpv_get_property_string get_property_string = nullptr;
+    pfn_mpv_free                free_fn = nullptr;
 } mpv;
 
 static bool loadMpvDll() {
@@ -96,6 +105,12 @@ static bool loadMpvDll() {
     LOAD(set_wakeup_callback)
     LOAD(error_string)
 
+    // Optional: these may not exist in very old mpv builds
+    mpv.get_property_string = reinterpret_cast<pfn_mpv_get_property_string>(
+        GetProcAddress(mpv.dll, "mpv_get_property_string"));
+    mpv.free_fn = reinterpret_cast<pfn_mpv_free>(
+        GetProcAddress(mpv.dll, "mpv_free"));
+
 #undef LOAD
 
     wave::log::info("libmpv loaded successfully");
@@ -119,7 +134,7 @@ static void onMpvWakeup(void* ctx) {
 
 namespace wave {
 
-bool Engine::init(HWND notifyWindow) {
+bool Engine::init(HWND notifyWindow, const AudioSettings& audioSettings) {
     m_notifyWindow = notifyWindow;
 
     if (!loadMpvDll()) return false;
@@ -137,6 +152,40 @@ bool Engine::init(HWND notifyWindow) {
     mpv.set_option_string(ctx, "vid", "no");
     mpv.set_option_string(ctx, "terminal", "no");
     mpv.set_option_string(ctx, "msg-level", "all=no");
+
+    // ── High-quality audio defaults ──
+    // Pass audio through without unnecessary resampling or format conversion
+    mpv.set_option_string(ctx, "audio-samplerate", "0");       // 0 = keep source sample rate
+    mpv.set_option_string(ctx, "audio-format", "0");            // 0 = keep source format
+    mpv.set_option_string(ctx, "audio-channels", "auto-safe");  // match source channels
+    mpv.set_option_string(ctx, "audio-normalize-downmix", "no");// no loudness normalization
+    mpv.set_option_string(ctx, "audio-pitch-correction", "yes");// clean pitch on speed change
+    mpv.set_option_string(ctx, "audio-swresample-o", "");       // no extra resampler options
+    // When resampling IS needed, use highest quality
+    mpv.set_option_string(ctx, "af", "");                       // no audio filters by default
+
+    // Audio backend
+    const char* ao = audioSettings.backendStr();
+    if (ao[0]) {
+        mpv.set_option_string(ctx, "ao", ao);
+        log::info(std::string("Audio backend: ") + ao);
+    }
+
+    // Audio device
+    if (!audioSettings.deviceId.empty()) {
+        mpv.set_option_string(ctx, "audio-device", audioSettings.deviceId.c_str());
+        log::info("Audio device: " + audioSettings.deviceId);
+    }
+
+    // Gapless playback
+    mpv.set_option_string(ctx, "gapless-audio", audioSettings.gapless ? "yes" : "no");
+
+    // ReplayGain
+    mpv.set_option_string(ctx, "replaygain", audioSettings.replayGainStr());
+    if (audioSettings.replayGain != ReplayGainMode::Off) {
+        std::string preamp = std::to_string(audioSettings.replayGainPreamp);
+        mpv.set_option_string(ctx, "replaygain-preamp", preamp.c_str());
+    }
 
     if (mpv.initialize(ctx) < 0) {
         log::error("mpv_initialize failed");
@@ -173,6 +222,7 @@ bool Engine::loadFile(std::string_view path) {
         return false;
     }
 
+    if (path.empty()) return false;
     std::string p(path);
     const char* cmd[] = { "loadfile", p.c_str(), nullptr };
     int err = mpv.command(static_cast<mpv_handle*>(m_mpv), cmd);
@@ -198,6 +248,13 @@ void Engine::togglePause() {
     if (!m_mpv || m_state == PlaybackState::Stopped) return;
     const char* cmd[] = { "cycle", "pause", nullptr };
     mpv.command(static_cast<mpv_handle*>(m_mpv), cmd);
+}
+
+void Engine::setPaused(bool paused) {
+    if (!m_mpv) return;
+    auto* ctx = static_cast<mpv_handle*>(m_mpv);
+    int flag = paused ? 1 : 0;
+    mpv.set_property(ctx, "pause", MPV_FORMAT_FLAG, &flag);
 }
 
 void Engine::stop() {
@@ -239,8 +296,6 @@ void Engine::setVolume(double vol) {
     m_volume = vol;
     mpv.set_property(static_cast<mpv_handle*>(m_mpv),
                      "volume", MPV_FORMAT_DOUBLE, &m_volume);
-    std::string msg = "Volume: " + std::to_string(static_cast<int>(m_volume)) + "%";
-    log::info(msg);
 }
 
 double Engine::volume()   const { return m_volume; }
@@ -248,6 +303,105 @@ double Engine::position() const { return m_position; }
 double Engine::duration() const { return m_duration; }
 PlaybackState Engine::state() const { return m_state; }
 const std::wstring& Engine::fileNameW() const { return m_fileName; }
+
+// ── Runtime audio settings ───────────────────────────────────
+
+void Engine::setGapless(bool enabled) {
+    if (!m_mpv) return;
+    auto* ctx = static_cast<mpv_handle*>(m_mpv);
+    const char* val = enabled ? "yes" : "no";
+    mpv.set_property(ctx, "gapless-audio", MPV_FORMAT_STRING, &val);
+    log::info(std::string("Gapless: ") + (enabled ? "on" : "off"));
+}
+
+void Engine::setReplayGain(ReplayGainMode mode) {
+    if (!m_mpv) return;
+    auto* ctx = static_cast<mpv_handle*>(m_mpv);
+    const char* val = "no";
+    if (mode == ReplayGainMode::Track) val = "track";
+    else if (mode == ReplayGainMode::Album) val = "album";
+    mpv.set_property(ctx, "replaygain", MPV_FORMAT_STRING, &val);
+    log::info(std::string("ReplayGain: ") + val);
+}
+
+void Engine::setReplayGainPreamp(double db) {
+    if (!m_mpv) return;
+    auto* ctx = static_cast<mpv_handle*>(m_mpv);
+    mpv.set_property(ctx, "replaygain-preamp", MPV_FORMAT_DOUBLE, &db);
+    log::info("ReplayGain preamp: " + std::to_string(db) + " dB");
+}
+
+void Engine::setAudioDevice(const std::string& deviceId) {
+    if (!m_mpv) return;
+    auto* ctx = static_cast<mpv_handle*>(m_mpv);
+    const char* val = deviceId.c_str();
+    mpv.set_property(ctx, "audio-device", MPV_FORMAT_STRING, &val);
+    log::info("Audio device set to: " + deviceId);
+}
+
+void Engine::setAudioFilter(const std::string& filterStr) {
+    if (!m_mpv) return;
+    auto* ctx = static_cast<mpv_handle*>(m_mpv);
+    // Must use set_property (not set_option_string) for runtime changes
+    const char* val = filterStr.c_str();
+    int err = mpv.set_property(ctx, "af", MPV_FORMAT_STRING, &val);
+    if (err < 0) {
+        log::warn("Failed to set audio filter: " + std::string(mpv.error_string(err)));
+    } else {
+        log::info("Audio filter: " + (filterStr.empty() ? "(cleared)" : filterStr));
+    }
+}
+
+std::vector<Engine::AudioDevice> Engine::getAudioDevices() const {
+    std::vector<AudioDevice> devices;
+    if (!m_mpv || !mpv.get_property_string) return devices;
+
+    auto* ctx = static_cast<mpv_handle*>(m_mpv);
+    char* list = mpv.get_property_string(ctx, "audio-device-list");
+    if (!list) return devices;
+
+    // mpv returns JSON: [{"name":"...","description":"..."},...]
+    std::string json(list);
+    if (mpv.free_fn) mpv.free_fn(list);
+
+    // Simple JSON array parser for [{name,description},...] objects
+    size_t pos = 0;
+    while (pos < json.size()) {
+        auto nameKey = json.find("\"name\"", pos);
+        if (nameKey == std::string::npos) break;
+        auto nameStart = json.find('"', nameKey + 6);
+        if (nameStart == std::string::npos) break;
+        nameStart++;
+        auto nameEnd = json.find('"', nameStart);
+        if (nameEnd == std::string::npos) break;
+
+        auto descKey = json.find("\"description\"", nameEnd);
+        if (descKey == std::string::npos) break;
+        auto descStart = json.find('"', descKey + 13);
+        if (descStart == std::string::npos) break;
+        descStart++;
+        auto descEnd = json.find('"', descStart);
+        if (descEnd == std::string::npos) break;
+
+        AudioDevice dev;
+        dev.id = json.substr(nameStart, nameEnd - nameStart);
+        dev.name = json.substr(descStart, descEnd - descStart);
+        devices.push_back(std::move(dev));
+        pos = descEnd + 1;
+    }
+
+    return devices;
+}
+
+std::string Engine::currentAudioDevice() const {
+    if (!m_mpv || !mpv.get_property_string) return {};
+    auto* ctx = static_cast<mpv_handle*>(m_mpv);
+    char* val = mpv.get_property_string(ctx, "audio-device");
+    if (!val) return {};
+    std::string result(val);
+    if (mpv.free_fn) mpv.free_fn(val);
+    return result;
+}
 
 void Engine::processEvents() {
     if (!m_mpv) return;
@@ -263,12 +417,22 @@ void Engine::processEvents() {
                 log::info("Playback started");
                 break;
 
-            case MPV_EVENT_END_FILE:
+            case MPV_EVENT_END_FILE: {
+                auto* ef = static_cast<mpv_event_end_file*>(ev->data);
+                int reason = ef ? ef->reason : -1;
                 m_state = PlaybackState::Stopped;
                 m_position = 0.0;
-                log::info("Playback ended");
-                if (m_trackEndCb) m_trackEndCb(m_trackEndCtx);
+                // Only auto-advance on natural EOF (reason 0).
+                // Reason 2 (stop) fires when loadfile replaces the current
+                // track — calling the callback would double-skip.
+                if (reason == 0) {
+                    log::info("Track finished (EOF)");
+                    if (m_trackEndCb) m_trackEndCb(m_trackEndCtx);
+                } else {
+                    log::info("Playback ended (reason " + std::to_string(reason) + ")");
+                }
                 break;
+            }
 
             case MPV_EVENT_PROPERTY_CHANGE: {
                 auto* prop = static_cast<mpv_event_property*>(ev->data);

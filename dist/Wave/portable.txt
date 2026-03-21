@@ -1,0 +1,1 @@
+Portable mode: settings stored in .\data\
